@@ -32,7 +32,6 @@ _ATTN_SAVE_HEADS = os.getenv("SGLANG_SAVE_ATTN_HEADS", "0,1")    # Default: only
 _ATTN_CURRENT_FILES = {}  # Dict mapping (layer, head) -> (file, writer, csv_path)
 _IS_PREFILL_PHASE = False  # Track if we're in prefill phase
 _ATTN_MAX_KEYS = {}  # Dict mapping (layer, head) -> max_keys
-_ATTN_ROWS_DATA = {}  # Dict mapping (layer, head) -> list of rows [[token_id, weights], ...]
 
 
 def _parse_range(range_str):
@@ -136,12 +135,19 @@ def manual_scaled_dot_product_attention(
                     f.close()
                 _ATTN_CURRENT_FILES.clear()
                 _ATTN_MAX_KEYS.clear()
-                _ATTN_ROWS_DATA.clear()
 
                 _IS_PREFILL_PHASE = True
                 _ATTN_TOKEN_COUNTER = 0
                 _ATTN_SAVE_COUNTER += 1
                 print(f"✅ Started new request [{_ATTN_SAVE_COUNTER-1}]", flush=True)
+
+                # 🐛 DEBUG: Log INSIDE manual_scaled_dot_product_attention
+                if layer_id == 0 and input_token_ids is not None:
+                    print(f"🐛 DEBUG INSIDE manual_sdpa (layer {layer_id}):", flush=True)
+                    print(f"   input_token_ids length: {len(input_token_ids)}", flush=True)
+                    print(f"   First 10 token IDs: {input_token_ids[:min(10, len(input_token_ids))]}", flush=True)
+                    if len(input_token_ids) > 0:
+                        print(f"   First token ID: {input_token_ids[0]} (expected 151644 for <|im_start|>)", flush=True)
 
             # If we're in decode phase (not prefill), update the phase flag
             if not is_prefill and _IS_PREFILL_PHASE:
@@ -162,13 +168,16 @@ def manual_scaled_dot_product_attention(
                     f = open(csv_path, 'w', newline='')
                     writer = csv.writer(f)
 
+                    # Write simple header (just query_token_id)
+                    # Rows will have variable length (valid CSV format)
+                    writer.writerow(["query_token_id"])
+
                     # Initialize tracking
                     weights_np = attn_weight[0, head_idx].detach().cpu().float().numpy()
                     num_keys = weights_np.shape[1]
 
                     _ATTN_CURRENT_FILES[file_key] = (f, writer, csv_path)
                     _ATTN_MAX_KEYS[file_key] = num_keys
-                    _ATTN_ROWS_DATA[file_key] = []
                     print(f"   Created CSV for layer {layer_id}, head {head_idx}: {csv_path.name}", flush=True)
 
                 # Get file, writer, and path for this layer/head
@@ -180,7 +189,12 @@ def manual_scaled_dot_product_attention(
                 num_queries = weights_np.shape[0]
                 num_keys = weights_np.shape[1]
 
-                # Store each query (row) with token ID (use actual token ID if available)
+                # Track max keys seen (just for logging)
+                if num_keys > max_keys:
+                    print(f"   ⚠️  Layer {layer_id} Head {head_idx}: Sequence grew from {max_keys} to {num_keys} keys", flush=True)
+                    _ATTN_MAX_KEYS[file_key] = num_keys
+
+                # Append new rows only (variable-length rows are valid CSV)
                 for row_idx, row in enumerate(weights_np):
                     if input_token_ids is not None and row_idx < len(input_token_ids):
                         # Use actual vocabulary token ID
@@ -190,30 +204,9 @@ def manual_scaled_dot_product_attention(
                         token_id_value = _ATTN_TOKEN_COUNTER + row_idx
 
                     row_data = row.tolist()
-                    _ATTN_ROWS_DATA[file_key].append([token_id_value, row_data])
-
-                # Check if sequence grew - need to rewrite file with new header
-                if num_keys > max_keys:
-                    print(f"   ⚠️  Layer {layer_id} Head {head_idx}: Sequence grew from {max_keys} to {num_keys} keys - rewriting file", flush=True)
-                    _ATTN_MAX_KEYS[file_key] = num_keys
-                    max_keys = num_keys
-
-                    # Close and reopen file to rewrite with new header
-                    f.close()
-                    f = open(csv_path, 'w', newline='')
-                    writer = csv.writer(f)
-                    _ATTN_CURRENT_FILES[file_key] = (f, writer, csv_path)
-
-                # Write header and all accumulated rows
-                # Use "key_N" for column headers (positional), "token_ID" for row labels (actual IDs)
-                writer.writerow(["query_token_id"] + [f"key_{i}" for i in range(max_keys)])
-                for token_id, row_data in _ATTN_ROWS_DATA[file_key]:
-                    # Pad row if needed
-                    if len(row_data) < max_keys:
-                        row_data_padded = row_data + [''] * (max_keys - len(row_data))
-                    else:
-                        row_data_padded = row_data
-                    writer.writerow([token_id] + row_data_padded)
+                    # Write row with token ID + all attention weights
+                    # CSV allows variable-length rows - early rows will have fewer columns
+                    writer.writerow([token_id_value] + row_data)
 
                 f.flush()  # Ensure data is written
 
@@ -343,6 +336,15 @@ class TorchNativeAttnBackend(AttentionBackend):
             if input_token_ids is not None:
                 per_req_token_ids = input_token_ids[start_q:end_q].cpu().numpy().tolist()
 
+                # 🐛 DEBUG: Log BEFORE calling manual_scaled_dot_product_attention
+                if layer_id == 0 and seq_idx == 0 and start_q == 0:
+                    print(f"🐛 DEBUG BEFORE manual_sdpa (layer {layer_id}, seq {seq_idx}):", flush=True)
+                    print(f"   Total input_token_ids length: {len(input_token_ids)}", flush=True)
+                    print(f"   First 10 token IDs: {input_token_ids[:10].cpu().numpy().tolist()}", flush=True)
+                    print(f"   per_req_token_ids length: {len(per_req_token_ids)}", flush=True)
+                    print(f"   First 10 per_req IDs: {per_req_token_ids[:10]}", flush=True)
+                    print(f"   start_q={start_q}, end_q={end_q}", flush=True)
+
             # Manual SDPA (saves attention weights)
             per_req_out_redudant_manual = (
                 manual_scaled_dot_product_attention(
@@ -361,6 +363,18 @@ class TorchNativeAttnBackend(AttentionBackend):
             )
 
             # Verify they match
+            # 🐛 DEBUG: Log shapes of attention outputs for all sequences
+            if layer_id == 0:
+                print(f"🐛 DEBUG Attention output shapes (layer {layer_id}, seq {seq_idx}):", flush=True)
+                print(f"   per_req_out_redudant_original shape: {per_req_out_redudant_original.shape}", flush=True)
+                print(f"   per_req_out_redudant_manual shape: {per_req_out_redudant_manual.shape}", flush=True)
+                print(f"   per_req_query_redudant shape: {per_req_query_redudant.shape}", flush=True)
+                print(f"   per_req_key shape: {per_req_key.shape}", flush=True)
+                print(f"   per_req_value shape: {per_req_value.shape}", flush=True)
+                print(f"   prefill_seq_len_q: {prefill_seq_len_q.item()}", flush=True)
+                print(f"   extend_seq_len_q: {extend_seq_len_q.item()}", flush=True)
+                print(f"   seq_len_kv: {seq_len_kv.item()}", flush=True)
+
             diff = per_req_out_redudant_original - per_req_out_redudant_manual
             max_diff = diff.abs().max().item()
             mse = (diff ** 2).mean().item()
@@ -368,8 +382,12 @@ class TorchNativeAttnBackend(AttentionBackend):
             if max_diff > 1e-5 or mse > 1e-10:
                 print(f"⚠️  WARNING: Extend attention outputs differ! Max diff: {max_diff:.2e}, MSE: {mse:.2e}", flush=True)
 
-            # Use the original output to ensure correctness
-            per_req_out_redudant = per_req_out_redudant_original
+            # Use manual output when saving attention weights (to match the saved weights),
+            # otherwise use original output for correctness
+            if _ATTN_SAVE_ENABLED:
+                per_req_out_redudant = per_req_out_redudant_manual
+            else:
+                per_req_out_redudant = per_req_out_redudant_original
             output[start_q:end_q, :, :] = per_req_out_redudant[prefill_seq_len_q:, :, :]
             start_q, start_kv = end_q, end_kv
         return output
@@ -473,8 +491,12 @@ class TorchNativeAttnBackend(AttentionBackend):
             if max_diff > 1e-5 or mse > 1e-10:
                 print(f"⚠️  WARNING: Decode attention outputs differ! Max diff: {max_diff:.2e}, MSE: {mse:.2e}", flush=True)
 
-            # Use the original output to ensure correctness
-            per_req_out = per_req_out_original
+            # Use manual output when saving attention weights (to match the saved weights),
+            # otherwise use original output for correctness
+            if _ATTN_SAVE_ENABLED:
+                per_req_out = per_req_out_manual
+            else:
+                per_req_out = per_req_out_original
             output[start_q:end_q, :, :] = per_req_out
             start_q, start_kv = end_q, end_kv
 

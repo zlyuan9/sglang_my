@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Any, Dict, Optional
+import time
 
 import torch
 from einops import rearrange
@@ -656,13 +657,67 @@ class Indexer(CustomOp):
                 or forward_batch.forward_mode.is_target_verify()
                 or forward_batch.forward_mode.is_draft_extend()
             ):
+                # Check if we're in CUDA graph capture mode
+                is_graph_capturing = torch.cuda.is_current_stream_capturing()
+
+                # Only do timing if not capturing CUDA graph
+                if not is_graph_capturing:
+                    torch.cuda.synchronize()
+                    topk_start_time = time.perf_counter()
+
                 topk_result = self._get_topk_paged(
                     forward_batch, layer_id, q_fp8, weights, metadata
                 )
+
+                # Only do timing and print if not capturing CUDA graph
+                if not is_graph_capturing:
+                    torch.cuda.synchronize()
+                    topk_elapsed_ms = (time.perf_counter() - topk_start_time) * 1000
+
+                    # Extract token information for debug
+                    token_info = ""
+                    if forward_batch.input_ids is not None and len(forward_batch.input_ids) > 0:
+                        token_ids = forward_batch.input_ids.tolist() if forward_batch.input_ids.numel() <= 10 else forward_batch.input_ids[:10].tolist()
+                        token_info = f", token_ids: {token_ids}"
+                    if forward_batch.positions is not None and len(forward_batch.positions) > 0:
+                        positions = forward_batch.positions.tolist() if len(forward_batch.positions) <= 10 else forward_batch.positions[:10].tolist()
+                        token_info += f", positions: {positions}"
+                    if forward_batch.seq_lens is not None and len(forward_batch.seq_lens) > 0:
+                        seq_lens = forward_batch.seq_lens.tolist() if len(forward_batch.seq_lens) <= 10 else forward_batch.seq_lens[:10].tolist()
+                        token_info += f", seq_lens: {seq_lens}"
+
+                    print(f"[NSA Indexer Layer {layer_id}] Top-k build time (paged): {topk_elapsed_ms:.3f} ms, batch_size: {forward_batch.batch_size}, topk: {self.index_topk}{token_info}")
             else:
+                # Check if we're in CUDA graph capture mode
+                is_graph_capturing = torch.cuda.is_current_stream_capturing()
+
+                # Only do timing if not capturing CUDA graph
+                if not is_graph_capturing:
+                    torch.cuda.synchronize()
+                    topk_start_time = time.perf_counter()
+
                 topk_result = self._get_topk_ragged(
                     forward_batch, layer_id, q_fp8, weights, metadata
                 )
+
+                # Only do timing and print if not capturing CUDA graph
+                if not is_graph_capturing:
+                    torch.cuda.synchronize()
+                    topk_elapsed_ms = (time.perf_counter() - topk_start_time) * 1000
+
+                    # Extract token information for debug
+                    token_info = ""
+                    if forward_batch.input_ids is not None and len(forward_batch.input_ids) > 0:
+                        token_ids = forward_batch.input_ids.tolist() if forward_batch.input_ids.numel() <= 10 else forward_batch.input_ids[:10].tolist()
+                        token_info = f", token_ids: {token_ids}"
+                    if forward_batch.positions is not None and len(forward_batch.positions) > 0:
+                        positions = forward_batch.positions.tolist() if len(forward_batch.positions) <= 10 else forward_batch.positions[:10].tolist()
+                        token_info += f", positions: {positions}"
+                    if forward_batch.seq_lens is not None and len(forward_batch.seq_lens) > 0:
+                        seq_lens = forward_batch.seq_lens.tolist() if len(forward_batch.seq_lens) <= 10 else forward_batch.seq_lens[:10].tolist()
+                        token_info += f", seq_lens: {seq_lens}"
+
+                    print(f"[NSA Indexer Layer {layer_id}] Top-k build time (ragged): {topk_elapsed_ms:.3f} ms, batch_size: {forward_batch.batch_size}, topk: {self.index_topk}{token_info}")
         else:
             topk_result = self.forward_indexer(
                 q_fp8.contiguous(),

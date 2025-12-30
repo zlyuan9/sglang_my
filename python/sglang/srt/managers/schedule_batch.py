@@ -38,6 +38,7 @@ TODO(lmzheng): ModelWorkerBatch seems a bit redundant and we consider removing i
 import copy
 import dataclasses
 import logging
+import os
 import re
 import time
 from enum import Enum, auto
@@ -1212,6 +1213,15 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
             pt += req.extend_input_len
 
+        # 🐛 DEBUG: Log before reassigning input_ids
+        if input_ids and len(input_ids) > 0:
+            print(f"🐛 DEBUG ScheduleBatch before reassign:", flush=True)
+            print(f"   input_ids list length: {len(input_ids)}", flush=True)
+            print(f"   First sequence input_ids length: {len(input_ids[0])}", flush=True)
+            print(f"   First 10 token IDs of first sequence: {input_ids[0][:min(10, len(input_ids[0]))]}", flush=True)
+            if len(input_ids[0]) > 0:
+                print(f"   First token ID: {input_ids[0][0]} (expected 151644 for <|im_start|>)", flush=True)
+
         # Reassign
         self.input_ids = torch.tensor(sum(input_ids, []), dtype=torch.int64).to(
             self.device, non_blocking=True
@@ -1244,7 +1254,28 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         # Init tensors
         reqs = self.reqs
+
+        # 🐛 DEBUG: Log BEFORE slicing (controlled by SGLANG_TOKEN_ID_DEBUG=1 env variable)
+        if os.getenv("SGLANG_TOKEN_ID_DEBUG", "0") == "1" and reqs and len(reqs) > 0:
+            print(f"🐛 DEBUG prepare_for_extend BEFORE slicing:", flush=True)
+            print(f"   Number of requests: {len(reqs)}", flush=True)
+            print(f"   First req.fill_ids length: {len(reqs[0].fill_ids)}", flush=True)
+            print(f"   First req.fill_ids[:10]: {reqs[0].fill_ids[:min(10, len(reqs[0].fill_ids))]}", flush=True)
+            print(f"   First req.prefix_indices length: {len(reqs[0].prefix_indices)}", flush=True)
+            if len(reqs[0].fill_ids) > 0:
+                print(f"   First token of fill_ids: {reqs[0].fill_ids[0]} (expected 151644 for <|im_start|>)", flush=True)
+
         input_ids = [r.fill_ids[len(r.prefix_indices) :] for r in reqs]
+
+        # 🐛 DEBUG: Log AFTER slicing (controlled by SGLANG_TOKEN_ID_DEBUG=1 env variable)
+        if os.getenv("SGLANG_TOKEN_ID_DEBUG", "0") == "1" and input_ids and len(input_ids) > 0:
+            print(f"🐛 DEBUG prepare_for_extend AFTER slicing:", flush=True)
+            print(f"   input_ids list length: {len(input_ids)}", flush=True)
+            print(f"   First sequence length: {len(input_ids[0])}", flush=True)
+            print(f"   First sequence[:10]: {input_ids[0][:min(10, len(input_ids[0]))]}", flush=True)
+            if len(input_ids[0]) > 0:
+                print(f"   First token after slicing: {input_ids[0][0]} (expected 151644 for <|im_start|>)", flush=True)
+
         extend_num_tokens = sum(len(ids) for ids in input_ids)
         seq_lens = [len(r.fill_ids) for r in reqs]
         orig_seq_lens = [max(len(r.fill_ids), len(r.origin_input_ids)) for r in reqs]

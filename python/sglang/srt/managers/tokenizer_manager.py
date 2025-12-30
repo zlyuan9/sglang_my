@@ -590,6 +590,15 @@ class TokenizerManager(TokenizerCommunicatorMixin):
             input_ids = encoded["input_ids"]
             token_type_ids = encoded.get("token_type_ids") if is_cross_encoder else None
 
+        # 🐛 DEBUG: Log tokenization output (controlled by SGLANG_TOKEN_ID_DEBUG=1 env variable)
+        if os.getenv("SGLANG_TOKEN_ID_DEBUG", "0") == "1" and input_ids and len(input_ids) > 0:
+            first_input_ids = input_ids[0] if isinstance(input_ids[0], list) else input_ids
+            print(f"🐛 DEBUG Tokenizer output:", flush=True)
+            print(f"   input_ids length: {len(first_input_ids)}", flush=True)
+            print(f"   First 10 token IDs: {first_input_ids[:min(10, len(first_input_ids))]}", flush=True)
+            if len(first_input_ids) > 0:
+                print(f"   First token ID: {first_input_ids[0]} (expected 151644 for <|im_start|>)", flush=True)
+
         # Step 4: Extract results based on input format
         return self._extract_tokenizer_results(
             input_ids, token_type_ids, input_format, original_batch_size
