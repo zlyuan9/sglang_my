@@ -109,6 +109,18 @@ from sglang.srt.mem_cache.memory_pool import (
     ReqToTokenPool,
     SWAKVPool,
 )
+
+try:
+    from sglang.srt.layers.attention.quest_backend import (
+        QuestMHATokenToKVPool,
+        _QUEST_FLAG,
+    )
+
+    _QUEST_BACKEND_AVAILABLE = True
+except ImportError:
+    _QUEST_BACKEND_AVAILABLE = False
+    _QUEST_FLAG = "/tmp/.sglang_quest_enabled"  # fallback, won't be used
+
 from sglang.srt.model_executor.cpu_graph_runner import CPUGraphRunner
 from sglang.srt.model_executor.cuda_graph_runner import CudaGraphRunner
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, PPProxyTensors
@@ -1841,7 +1853,38 @@ class ModelRunner:
                     use_mla=self.use_mla_backend,
                     **extra_args,
                 )
+            elif _QUEST_BACKEND_AVAILABLE and self.server_args.enable_quest_attention and self.page_size > 1:
+                # QuestMHATokenToKVPool adds min_k_buffer + max_k_buffer per layer,
+                # each sized (num_pages, head_num, head_dim). With page_size=1,
+                # num_pages == max_tokens, so these buffers are as large as the full
+                # K-cache — doubling memory. Quest is also meaningless at page_size=1
+                # (no page-level sparsity), so fall through to plain MHATokenToKVPool.
+                self.token_to_kv_pool = QuestMHATokenToKVPool(
+                    self.max_total_num_tokens,
+                    page_size=self.page_size,
+                    dtype=self.kv_cache_dtype,
+                    head_num=self.model_config.get_num_kv_heads(
+                        get_attention_tp_size()
+                    ),
+                    head_dim=self.model_config.head_dim,
+                    layer_num=self.num_effective_layers,
+                    device=self.device,
+                    enable_memory_saver=self.server_args.enable_memory_saver,
+                    start_layer=self.start_layer,
+                    end_layer=self.end_layer,
+                    enable_alt_stream=not self.server_args.enable_pdmux,
+                    enable_kv_cache_copy=(
+                        self.server_args.speculative_algorithm is not None
+                    ),
+                )
             else:
+                if _QUEST_BACKEND_AVAILABLE and self.page_size == 1:
+                    logger.warning(
+                        "Quest Attention requires page_size > 1 "
+                        "(current page_size=1 would double KV-cache memory). "
+                        "Using standard MHATokenToKVPool. "
+                        "Re-launch with --page-size 16 (or larger) to enable Quest."
+                    )
                 self.token_to_kv_pool = MHATokenToKVPool(
                     self.max_total_num_tokens,
                     page_size=self.page_size,
@@ -2096,6 +2139,33 @@ class ModelRunner:
                 forward_batch.attn_backend = self.decode_attn_backend
             else:
                 self.attn_backend.init_forward_metadata(forward_batch)
+
+        # Pre-compute QUEST state once per step so individual layers don't each
+        # do a D2H sync or a filesystem syscall.
+        if _QUEST_BACKEND_AVAILABLE and isinstance(
+            self.token_to_kv_pool, QuestMHATokenToKVPool
+        ):
+            quest_on = os.path.exists(_QUEST_FLAG)
+            forward_batch._quest_enabled = quest_on
+            if quest_on:
+                # Compute the actual pool page indices for each request.
+                # req_to_token[req_pool_idx, t] = pool slot for token t.
+                # Tokens are allocated in page_size chunks, so sampling every
+                # page_size-th slot gives exactly one representative slot per
+                # page without needing torch.unique() (no D2H sync).
+                ps = self.token_to_kv_pool.page_size
+                rtt = forward_batch.req_to_token_pool.req_to_token  # [max_req, max_len]
+                rpi = forward_batch.req_pool_indices                  # [batch]
+                seq_lens_cpu = forward_batch.seq_lens.cpu().tolist()
+                page_indices_per_req = []
+                for b, (ridx, slen) in enumerate(zip(rpi.tolist(), seq_lens_cpu)):
+                    slen = int(slen)
+                    # Slots at positions 0, ps, 2*ps, ... give one slot per page
+                    slots = rtt[ridx, 0:slen:ps]              # [num_pages_for_req]
+                    page_idxs = torch.div(slots, ps, rounding_mode='floor')
+                    page_indices_per_req.append(page_idxs)
+                forward_batch._quest_page_indices_per_req = page_indices_per_req
+                forward_batch._quest_seq_lens_cpu = seq_lens_cpu
         # FIXME: add pp_proxy_tensors arg to all models
         kwargs = {}
         if self.support_pp:

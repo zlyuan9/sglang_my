@@ -622,6 +622,28 @@ async def classify_request(obj: EmbeddingReqInput, request: Request):
         return _create_error_response(e)
 
 
+@app.api_route("/set_quest_attention", methods=["GET", "POST"])
+async def set_quest_attention(request: Request):
+    """Enable or disable Quest Attention at runtime (no server restart needed)."""
+    try:
+        body = await request.json()
+        enabled = bool(body.get("enabled", False))
+    except Exception:
+        enabled = False
+    try:
+        flag = "/tmp/.sglang_quest_enabled"
+        if enabled:
+            open(flag, "w").close()
+        elif os.path.exists(flag):
+            os.remove(flag)
+        return Response(
+            content=f"Quest attention {'enabled' if enabled else 'disabled'}.\n",
+            status_code=200,
+        )
+    except Exception as e:
+        return Response(content=f"Failed: {e}\n", status_code=500)
+
+
 @app.api_route("/flush_cache", methods=["GET", "POST"])
 async def flush_cache():
     """Flush the radix cache."""

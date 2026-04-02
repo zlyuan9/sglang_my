@@ -1,86 +1,117 @@
-<div align="center" id="sglangtop">
-<img src="https://raw.githubusercontent.com/sgl-project/sglang/main/assets/logo.png" alt="logo" width="400" margin="10px"></img>
+# Quest Attention for SGLang
 
-[![PyPI](https://img.shields.io/pypi/v/sglang)](https://pypi.org/project/sglang)
-![PyPI - Downloads](https://static.pepy.tech/badge/sglang?period=month)
-[![license](https://img.shields.io/github/license/sgl-project/sglang.svg)](https://github.com/sgl-project/sglang/tree/main/LICENSE)
-[![issue resolution](https://img.shields.io/github/issues-closed-raw/sgl-project/sglang)](https://github.com/sgl-project/sglang/issues)
-[![open issues](https://img.shields.io/github/issues-raw/sgl-project/sglang)](https://github.com/sgl-project/sglang/issues)
-[![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/sgl-project/sglang)
+This is a fork of [SGLang](https://github.com/sgl-project/sglang) with **Quest Attention** — a sparse-attention mechanism for the decode phase that scores every KV-cache page and attends only to the top-*k* most critical pages, reducing memory bandwidth and improving decode throughput for long-context inference.
 
-</div>
+Based on the paper: [*Quest: Query-Aware Sparsity for Efficient Long-Context LLM Inference*](https://arxiv.org/abs/2406.10774) (ICML 2024).
 
---------------------------------------------------------------------------------
+## How It Works
 
-| [**Blog**](https://lmsys.org/blog/)
-| [**Documentation**](https://docs.sglang.ai/)
-| [**Join Slack**](https://slack.sglang.ai/)
-| [**Join Bi-Weekly Development Meeting**](https://meeting.sglang.ai/)
-| [**Roadmap**](https://github.com/sgl-project/sglang/issues/12780)
-| [**Slides**](https://github.com/sgl-project/sgl-learning-materials?tab=readme-ov-file#slides) |
+Standard paged-attention reads *all* KV-cache pages during decode. Quest adds a lightweight page-scoring step that selects only the most relevant pages per query, then runs FlashInfer attention on the sparse subset.
 
-## News
-- [2025/11] 🔥 SGLang Diffusion accelerates video and image generation ([blog](https://lmsys.org/blog/2025-11-07-sglang-diffusion/)).
-- [2025/10] 🔥 SGLang now runs natively on TPU with the SGLang-Jax backend ([blog](https://lmsys.org/blog/2025-10-29-sglang-jax/)).
-- [2025/10] PyTorch Conference 2025 SGLang Talk ([slide](https://github.com/sgl-project/sgl-learning-materials/blob/main/slides/sglang_pytorch_2025.pdf)).
-- [2025/09] 🔥 Deploying DeepSeek on GB200 NVL72 with PD and Large Scale EP (Part II): 3.8x Prefill, 4.8x Decode Throughput ([blog](https://lmsys.org/blog/2025-09-25-gb200-part-2/)).
-- [2025/09] SGLang Day 0 Support for DeepSeek-V3.2 with Sparse Attention ([blog](https://lmsys.org/blog/2025-09-29-deepseek-V32/)).
-- [2025/08] SGLang x AMD SF Meetup on 8/22: Hands-on GPU workshop, tech talks by AMD/xAI/SGLang, and networking ([Roadmap](https://github.com/sgl-project/sgl-learning-materials/blob/main/slides/amd_meetup_sglang_roadmap.pdf), [Large-scale EP](https://github.com/sgl-project/sgl-learning-materials/blob/main/slides/amd_meetup_sglang_ep.pdf), [Highlights](https://github.com/sgl-project/sgl-learning-materials/blob/main/slides/amd_meetup_highlights.pdf), [AITER/MoRI](https://github.com/sgl-project/sgl-learning-materials/blob/main/slides/amd_meetup_aiter_mori.pdf), [Wave](https://github.com/sgl-project/sgl-learning-materials/blob/main/slides/amd_meetup_wave.pdf)).
-- [2025/08] SGLang provides day-0 support for OpenAI gpt-oss model ([instructions](https://github.com/sgl-project/sglang/issues/8833))
-- [2025/05] Deploying DeepSeek with PD Disaggregation and Large-scale Expert Parallelism on 96 H100 GPUs ([blog](https://lmsys.org/blog/2025-05-05-large-scale-ep/)).
+```
+decode step
+  │
+  ├─ update_min_max()          # maintain per-page key bounding boxes
+  │
+  ├─ estimate_page_criticality()  # score pages via bounding-box upper bound
+  │     for each dimension d:
+  │       score += q[d] * max_key[d]   if q[d] >= 0
+  │       score += q[d] * min_key[d]   if q[d] <  0
+  │
+  ├─ top-k selection           # keep k most critical + n recent pages
+  │
+  └─ FlashInfer paged decode   # attend only to selected pages
+```
 
-<details>
-<summary>More</summary>
+### Key idea
 
-- [2025/10] SGLang x Nvidia SF Meetup on 10/2 ([recap](https://x.com/lmsysorg/status/1975339501934510231)).
-- [2025/06] SGLang, the high-performance serving infrastructure powering trillions of tokens daily, has been awarded the third batch of the Open Source AI Grant by a16z ([a16z blog](https://a16z.com/advancing-open-source-ai-through-benchmarks-and-bold-experimentation/)).
-- [2025/06] Deploying DeepSeek on GB200 NVL72 with PD and Large Scale EP (Part I): 2.7x Higher Decoding Throughput ([blog](https://lmsys.org/blog/2025-06-16-gb200-part-1/)).
-- [2025/03] Supercharge DeepSeek-R1 Inference on AMD Instinct MI300X ([AMD blog](https://rocm.blogs.amd.com/artificial-intelligence/DeepSeekR1-Part2/README.html))
-- [2025/03] SGLang Joins PyTorch Ecosystem: Efficient LLM Serving Engine ([PyTorch blog](https://pytorch.org/blog/sglang-joins-pytorch/))
-- [2025/02] Unlock DeepSeek-R1 Inference Performance on AMD Instinct™ MI300X GPU ([AMD blog](https://rocm.blogs.amd.com/artificial-intelligence/DeepSeekR1_Perf/README.html))
-- [2025/01] SGLang provides day one support for DeepSeek V3/R1 models on NVIDIA and AMD GPUs with DeepSeek-specific optimizations. ([instructions](https://github.com/sgl-project/sglang/tree/main/benchmark/deepseek_v3), [AMD blog](https://www.amd.com/en/developer/resources/technical-articles/amd-instinct-gpus-power-deepseek-v3-revolutionizing-ai-development-with-sglang.html), [10+ other companies](https://x.com/lmsysorg/status/1887262321636221412))
-- [2024/12] v0.4 Release: Zero-Overhead Batch Scheduler, Cache-Aware Load Balancer, Faster Structured Outputs ([blog](https://lmsys.org/blog/2024-12-04-sglang-v0-4/)).
-- [2024/10] The First SGLang Online Meetup ([slides](https://github.com/sgl-project/sgl-learning-materials?tab=readme-ov-file#the-first-sglang-online-meetup)).
-- [2024/09] v0.3 Release: 7x Faster DeepSeek MLA, 1.5x Faster torch.compile, Multi-Image/Video LLaVA-OneVision ([blog](https://lmsys.org/blog/2024-09-04-sglang-v0-3/)).
-- [2024/07] v0.2 Release: Faster Llama3 Serving with SGLang Runtime (vs. TensorRT-LLM, vLLM) ([blog](https://lmsys.org/blog/2024-07-25-sglang-llama3/)).
-- [2024/02] SGLang enables **3x faster JSON decoding** with compressed finite state machine ([blog](https://lmsys.org/blog/2024-02-05-compressed-fsm/)).
-- [2024/01] SGLang provides up to **5x faster inference** with RadixAttention ([blog](https://lmsys.org/blog/2024-01-17-sglang/)).
-- [2024/01] SGLang powers the serving of the official **LLaVA v1.6** release demo ([usage](https://github.com/haotian-liu/LLaVA?tab=readme-ov-file#demo)).
+Each KV-cache page maintains a bounding box (`min_key`, `max_key`) per head and dimension. At decode time, the query is dot-producted against these bounds to get a tight upper bound on the maximum attention score for that page. Only the top-*k* highest-scoring pages (plus a window of recent pages for recency bias) are passed to the attention kernel.
 
-</details>
+## Changed Files
 
-## About
-SGLang is a high-performance serving framework for large language models and vision-language models.
-It is designed to deliver low-latency and high-throughput inference across a wide range of setups, from a single GPU to large distributed clusters.
-Its core features include:
+| File | What changed |
+|------|-------------|
+| `python/sglang/srt/layers/attention/quest_backend.py` | **New.** `QuestMHATokenToKVPool` (KV pool with per-page min/max tracking), `estimate_page_criticality()`, `quest_select_sparse_page_table()` |
+| `python/sglang/srt/layers/attention/flashinfer_backend.py` | Quest sparse-attention decode path: builds sparse page table, calls FlashInfer with selected pages only |
+| `python/sglang/srt/model_executor/model_runner.py` | Instantiates `QuestMHATokenToKVPool` when `--enable-quest-attention` is set; pre-computes per-request page indices each step |
+| `python/sglang/srt/server_args.py` | `--enable-quest-attention` CLI flag |
+| `python/sglang/srt/mem_cache/allocator.py` | Calls `invalidate_pages()` on page free so stale bounding boxes aren't reused |
+| `python/sglang/srt/entrypoints/http_server.py` | `POST /set_quest_attention` endpoint for runtime toggle |
+| `python/sglang/srt/kernels/quest_attention.cu` | Standalone CUDA kernel (page-level fused QKV attention with online softmax) |
 
-- **Fast Backend Runtime**: Provides efficient serving with RadixAttention for prefix caching, a zero-overhead CPU scheduler, prefill-decode disaggregation, speculative decoding, continuous batching, paged attention, tensor/pipeline/expert/data parallelism, structured outputs, chunked prefill, quantization (FP4/FP8/INT4/AWQ/GPTQ), and multi-LoRA batching.
-- **Extensive Model Support**: Supports a wide range of generative models (Llama, Qwen, DeepSeek, Kimi, GLM, GPT, Gemma, Mistral, etc.), embedding models (e5-mistral, gte, mcdse), and reward models (Skywork), with easy extensibility for integrating new models. Compatible with most Hugging Face models and OpenAI APIs.
-- **Extensive Hardware Support**: Runs on NVIDIA GPUs (GB200/B300/H100/A100/Spark), AMD GPUs (MI355/MI300), Intel Xeon CPUs, Google TPUs, Ascend NPUs, and more.
-- **Flexible Frontend Language**: Offers an intuitive interface for programming LLM applications, supporting chained generation calls, advanced prompting, control flow, multi-modal inputs, parallelism, and external interactions.
-- **Active Community**: SGLang is open-source and supported by a vibrant community with widespread industry adoption, powering over 300,000 GPUs worldwide.
+## Usage
 
-## Getting Started
-- [Install SGLang](https://docs.sglang.ai/get_started/install.html)
-- [Quick Start](https://docs.sglang.ai/basic_usage/send_request.html)
-- [Backend Tutorial](https://docs.sglang.ai/basic_usage/openai_api_completions.html)
-- [Frontend Tutorial](https://docs.sglang.ai/references/frontend/frontend_tutorial.html)
-- [Contribution Guide](https://docs.sglang.ai/developer_guide/contribution_guide.html)
+### Launch with Quest enabled
 
-## Benchmark and Performance
-Learn more in the release blogs: [v0.2 blog](https://lmsys.org/blog/2024-07-25-sglang-llama3/), [v0.3 blog](https://lmsys.org/blog/2024-09-04-sglang-v0-3/), [v0.4 blog](https://lmsys.org/blog/2024-12-04-sglang-v0-4/), [Large-scale expert parallelism](https://lmsys.org/blog/2025-05-05-large-scale-ep/).
+```bash
+python -m sglang.launch_server \
+    --model-path meta-llama/Llama-3.1-8B-Instruct \
+    --enable-quest-attention \
+    --page-size 16 \
+    --disable-cuda-graph
+```
 
-## Roadmap
-[Development Roadmap (2025 Q4)](https://github.com/sgl-project/sglang/issues/12780)
+- `--page-size 16` (or larger) is required — Quest operates at page granularity, so `page_size=1` is meaningless and would double memory.
+- `--disable-cuda-graph` is required because the min/max tracking uses `torch.unique()` which triggers host-device syncs incompatible with CUDA graph capture.
 
-## Adoption and Sponsorship
-SGLang has been deployed at large scale, generating trillions of tokens in production each day. It is trusted and adopted by a wide range of leading enterprises and institutions, including xAI, AMD, NVIDIA, Intel, LinkedIn, Cursor, Oracle Cloud, Google Cloud, Microsoft Azure, AWS, Atlas Cloud, Voltage Park, Nebius, DataCrunch, Novita, InnoMatrix, MIT, UCLA, the University of Washington, Stanford, UC Berkeley, Tsinghua University, Jam & Tea Studios, Baseten, and other major technology organizations across North America and Asia. As an open-source LLM inference engine, SGLang has become the de facto industry standard, with deployments running on over 300,000 GPUs worldwide.
-SGLang is currently hosted under the non-profit open-source organization [LMSYS](https://lmsys.org/about/).
+### Runtime toggle
 
-<img src="https://raw.githubusercontent.com/sgl-project/sgl-learning-materials/refs/heads/main/slides/adoption.png" alt="logo" width="800" margin="10px"></img>
+Quest can be enabled/disabled at runtime without restarting the server:
 
-## Contact Us
-For enterprises interested in adopting or deploying SGLang at scale, including technical consulting, sponsorship opportunities, or partnership inquiries, please contact us at sglang@lmsys.org
+```bash
+# Enable
+curl -X POST http://localhost:30000/set_quest_attention \
+     -H "Content-Type: application/json" \
+     -d '{"enabled": true}'
 
-## Acknowledgment
-We learned the design and reused code from the following projects: [Guidance](https://github.com/guidance-ai/guidance), [vLLM](https://github.com/vllm-project/vllm), [LightLLM](https://github.com/ModelTC/lightllm), [FlashInfer](https://github.com/flashinfer-ai/flashinfer), [Outlines](https://github.com/outlines-dev/outlines), and [LMQL](https://github.com/eth-sri/lmql).
+# Disable (falls back to standard FlashInfer path)
+curl -X POST http://localhost:30000/set_quest_attention \
+     -H "Content-Type: application/json" \
+     -d '{"enabled": false}'
+```
+
+### Configuration
+
+`QuestMHATokenToKVPool` accepts two tuning parameters:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `num_quest_pages` | 256 | Total page budget per request (top-k scored + recent) |
+| `num_recent_pages` | 32 | Pages from the end of the sequence always included (recency window) |
+
+## Architecture
+
+```
+QuestMHATokenToKVPool (extends MHATokenToKVPool)
+├── k_buffer / v_buffer          # standard paged KV cache
+├── min_k_buffer[layer]          # per-page key lower bounds  [num_pages, H, D]
+├── max_k_buffer[layer]          # per-page key upper bounds  [num_pages, H, D]
+└── page_valid[layer]            # tracks which pages have valid bounds
+
+set_kv_buffer()
+└── super().set_kv_buffer()      # write K,V to cache
+└── update_min_max()             # update bounding boxes via scatter_reduce
+
+PagedTokenToKVPoolAllocator.free()
+└── invalidate_pages()           # reset bounds on freed pages
+
+FlashInferAttnBackend.forward_decode()
+├── quest_select_sparse_page_table()   # score + select top-k pages
+│   ├── estimate_page_criticality()    # bounding-box scoring
+│   └── torch.topk()                   # page selection
+└── BatchDecodeWithPagedKVCacheWrapper # FlashInfer on sparse page table
+```
+
+## Building the CUDA Kernel (optional)
+
+The standalone CUDA kernel in `python/sglang/srt/kernels/` is a reference implementation. The main integration uses FlashInfer's paged decode with a sparse page table, so building this kernel is not required for the default path.
+
+```bash
+cd python/sglang/srt/kernels
+pip install -e .
+python quest_kernel_test.py
+```
+
+## Upstream
+
+This fork is based on [JhengLu/sglang_my](https://github.com/JhengLu/sglang_my), which tracks [sgl-project/sglang](https://github.com/sgl-project/sglang).

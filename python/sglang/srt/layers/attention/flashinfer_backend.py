@@ -23,6 +23,9 @@ from sglang.srt.layers.dp_attention import get_attention_tp_size
 from sglang.srt.layers.radix_attention import AttentionType
 from sglang.srt.mem_cache.allocator import SWATokenToKVPoolAllocator
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch, ForwardMode
+
+# Flag file used for IPC: created by POST /set_quest_attention, read here each decode step.
+_QUEST_FLAG = "/tmp/.sglang_quest_enabled"
 from sglang.srt.speculative.spec_info import SpecInput
 from sglang.srt.utils import (
     get_int_env_var,
@@ -36,6 +39,18 @@ if TYPE_CHECKING:
     from sglang.srt.model_executor.model_runner import ModelRunner
 
 logger = logging.getLogger(__name__)
+
+# Optional QUEST sparse-attention integration
+try:
+    from sglang.srt.layers.attention.quest_backend import (
+        QuestMHATokenToKVPool,
+        _QUEST_FLAG,
+        quest_select_sparse_page_table,
+    )
+    _QUEST_BACKEND_AVAILABLE = True
+except ImportError:
+    _QUEST_BACKEND_AVAILABLE = False
+    _QUEST_FLAG = "/tmp/.sglang_quest_enabled"
 
 if envs.SGLANG_ENABLE_TORCH_COMPILE.get():
     torch._logging.set_logs(dynamo=logging.ERROR)
@@ -168,6 +183,13 @@ class FlashInferAttnBackend(AttentionBackend):
         self.enable_deterministic = (
             model_runner.server_args.enable_deterministic_inference
         )
+        # Initialise the flag file from the server arg so that the server starts
+        # in the correct Quest state. The flag can be flipped at runtime via
+        # POST /set_quest_attention without restarting the server.
+        if model_runner.server_args.enable_quest_attention:
+            open(_QUEST_FLAG, "w").close()
+        elif os.path.exists(_QUEST_FLAG):
+            os.remove(_QUEST_FLAG)
         self.prefill_split_tile_size = None
         self.decode_split_tile_size = None
         self.disable_cuda_graph_kv_split = False
@@ -271,6 +293,25 @@ class FlashInferAttnBackend(AttentionBackend):
                     use_tensor_cores=self.decode_use_tensor_cores,
                 )
             )
+
+        # Quest sparse-attention decode wrapper: separate wrapper that is
+        # begin_forward'd with a sparse page table (top-k pages) per decode step.
+        # Uses the actual KV pool page_size so indices are page-level, not token-level,
+        # and the KV buffer is viewed as [total_pages, page_size, Hkv, D].
+        # Gets its OWN workspace buffer to avoid interference with the standard wrapper.
+        if _QUEST_BACKEND_AVAILABLE:
+            self.quest_workspace_buffer = torch.empty(
+                envs.SGLANG_FLASHINFER_WORKSPACE_SIZE.get(),
+                dtype=torch.uint8,
+                device=model_runner.device,
+            )
+            self.quest_decode_wrapper = BatchDecodeWithPagedKVCacheWrapper(
+                self.quest_workspace_buffer,
+                "NHD",
+                use_tensor_cores=self.decode_use_tensor_cores,
+            )
+        else:
+            self.quest_decode_wrapper = None
 
         # Create indices updater
         if not skip_prefill:
@@ -816,6 +857,86 @@ class FlashInferAttnBackend(AttentionBackend):
                     layer, cache_loc, k, v, layer.k_scale, layer.v_scale
                 )
 
+        # ----------------------------------------------------------------
+        # QUEST path: sparse attention over top-k critical KV-cache pages
+        # Toggled at runtime via POST /set_quest_attention (flag file IPC).
+        # Falls back to the standard FlashInfer path when disabled (default).
+        # ----------------------------------------------------------------
+        if (
+            _QUEST_BACKEND_AVAILABLE
+            and isinstance(forward_batch.token_to_kv_pool, QuestMHATokenToKVPool)
+            and getattr(forward_batch, '_quest_enabled', None)
+        ):
+            q_view = q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim)
+            kv_pool = forward_batch.token_to_kv_pool
+            ps = kv_pool.page_size
+
+            if layer.layer_id == 0:
+                kv_indptr, kv_indices, kv_last_page_len = quest_select_sparse_page_table(
+                    q_view,
+                    layer.layer_id,
+                    kv_pool,
+                    forward_batch._quest_page_indices_per_req,
+                    forward_batch._quest_seq_lens_cpu,
+                )
+                updater = self.indices_updater_decode
+
+                # Debug: log shapes on first decode step
+                if not hasattr(forward_batch, '_quest_logged'):
+                    forward_batch._quest_logged = True
+                    total_pages_total = kv_pool.k_buffer[0].shape[0] // ps
+                    import sys
+                    print(
+                        f"[QUEST-DBG] B={q_view.shape[0]} "
+                        f"Hq={updater.num_qo_heads} Hkv={updater.num_kv_heads} D={updater.head_dim} "
+                        f"ps={ps} total_pages={total_pages_total} "
+                        f"kv_indptr={kv_indptr.tolist()} "
+                        f"kv_indices[:10]={kv_indices[:10].tolist()} "
+                        f"kv_last_page_len={kv_last_page_len.tolist()} "
+                        f"k_buf_shape={kv_pool.k_buffer[0].shape} "
+                        f"n_selected={kv_indices.shape[0]}",
+                        file=sys.stderr, flush=True,
+                    )
+
+                quest_wrapper = BatchDecodeWithPagedKVCacheWrapper(
+                    self.quest_workspace_buffer,
+                    "NHD",
+                    use_tensor_cores=self.decode_use_tensor_cores,
+                )
+                quest_wrapper.begin_forward(
+                    kv_indptr,
+                    kv_indices,
+                    kv_last_page_len,
+                    updater.num_qo_heads,
+                    updater.num_kv_heads,
+                    updater.head_dim,
+                    ps,
+                    data_type=updater.data_type,
+                    q_data_type=updater.q_data_type,
+                    non_blocking=False,
+                )
+                total_pages = kv_pool.k_buffer[0].shape[0] // ps
+                forward_batch._quest_total_pages = total_pages
+                forward_batch._quest_wrapper = quest_wrapper
+
+            total_pages = forward_batch._quest_total_pages
+            k_buf, v_buf = kv_pool.get_kv_buffer(layer.layer_id)
+            k_paged = k_buf[:total_pages * ps].view(total_pages, ps, k_buf.shape[1], k_buf.shape[2])
+            v_paged = v_buf[:total_pages * ps].view(total_pages, ps, v_buf.shape[1], v_buf.shape[2])
+
+            o = forward_batch._quest_wrapper.forward(
+                q_view,
+                (k_paged, v_paged),
+                sm_scale=layer.scaling,
+                logits_soft_cap=layer.logit_cap,
+                k_scale=layer.k_scale_float,
+                v_scale=layer.v_scale_float,
+            )
+            return o.view(-1, layer.tp_q_head_num * layer.head_dim)
+
+        # ----------------------------------------------------------------
+        # Default FlashInfer path (full paged-KV attention)
+        # ----------------------------------------------------------------
         # Call the wrapped function
         o = decode_wrapper.forward(
             q.contiguous().view(-1, layer.tp_q_head_num, layer.head_dim),

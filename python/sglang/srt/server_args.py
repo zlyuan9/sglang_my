@@ -405,6 +405,7 @@ class ServerArgs:
     moe_runner_backend: str = "auto"
     flashinfer_mxfp4_moe_precision: Literal["default", "bf16"] = "default"
     enable_flashinfer_allreduce_fusion: bool = False
+    enable_quest_attention: bool = False
     deepep_mode: Literal["auto", "normal", "low_latency"] = "auto"
     ep_num_redundant_experts: int = 0
     ep_dispatch_algorithm: Optional[Literal["static", "dynamic", "fake"]] = None
@@ -2897,6 +2898,16 @@ class ServerArgs:
             "--enable-flashinfer-allreduce-fusion",
             action="store_true",
             help="Enable FlashInfer allreduce fusion with Residual RMSNorm.",
+        )
+        parser.add_argument(
+            "--enable-quest-attention",
+            action="store_true",
+            help=(
+                "Use Quest sparse-attention during decode: scores every KV-cache page "
+                "and attends only to the top-k most critical pages. "
+                "Requires a QuestMHATokenToKVPool KV cache. "
+                "When disabled (default) the standard FlashInfer paged-KV path is used."
+            ),
         )
         parser.add_argument(
             "--deepep-mode",
