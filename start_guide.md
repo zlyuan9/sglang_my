@@ -32,7 +32,7 @@ This guide walks you through setting up and running the complete browser agent s
 - **GPU Access**: You are connected to the GPU host via VS Code Remote SSH (the integrated terminal runs on the GPU machine)
 - **CUDA**: CUDA-enabled GPU (NVIDIA recommended)
 - **Python**: Python 3.12+
-- **Memory**: Model-dependent (Qwen3-VL-30B needs ~60GB GPU memory)
+- **Memory**: Model-dependent
 
 ---
 
@@ -113,22 +113,6 @@ echo 'export HF_MODELS="/home/colinz/DSL/BrowserUse/models"' >> ~/.bashrc
 
 ### 2.1 Download Qwen3-VL Model
 
-If the model isn't already available, download it:
-```bash
-cd ~/projects
-python << EOF
-from huggingface_hub import snapshot_download
-
-snapshot_download(
-    repo_id="Qwen/Qwen3-VL-30B-A3B-Instruct",
-    local_dir="$HF_MODELS/Qwen/Qwen3-VL-30B-A3B-Instruct",
-    local_dir_use_symlinks=False
-)
-EOF
-```
-
-This will download ~60GB of model files.
-
 ---
 
 ## Part 3: Launch SGLang Server
@@ -140,9 +124,9 @@ Check available GPUs:
 nvidia-smi
 ```
 
-Set which GPUs to use (example using GPUs 0-3):
+Set which GPUs to use (gray just has 0):
 ```bash
-export CUDA_VISIBLE_DEVICES=0,1,2,3
+export CUDA_VISIBLE_DEVICES=0
 ```
 
 ### 3.2 Launch Server (Interactive Mode)
