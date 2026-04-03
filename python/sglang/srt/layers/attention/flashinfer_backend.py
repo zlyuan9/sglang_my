@@ -881,23 +881,6 @@ class FlashInferAttnBackend(AttentionBackend):
                 )
                 updater = self.indices_updater_decode
 
-                # Debug: log shapes on first decode step
-                if not hasattr(forward_batch, '_quest_logged'):
-                    forward_batch._quest_logged = True
-                    total_pages_total = kv_pool.k_buffer[0].shape[0] // ps
-                    import sys
-                    print(
-                        f"[QUEST-DBG] B={q_view.shape[0]} "
-                        f"Hq={updater.num_qo_heads} Hkv={updater.num_kv_heads} D={updater.head_dim} "
-                        f"ps={ps} total_pages={total_pages_total} "
-                        f"kv_indptr={kv_indptr.tolist()} "
-                        f"kv_indices[:10]={kv_indices[:10].tolist()} "
-                        f"kv_last_page_len={kv_last_page_len.tolist()} "
-                        f"k_buf_shape={kv_pool.k_buffer[0].shape} "
-                        f"n_selected={kv_indices.shape[0]}",
-                        file=sys.stderr, flush=True,
-                    )
-
                 quest_wrapper = BatchDecodeWithPagedKVCacheWrapper(
                     self.quest_workspace_buffer,
                     "NHD",

@@ -60,7 +60,7 @@ class QuestMHATokenToKVPool(MHATokenToKVPool):
         end_layer: Optional[int] = None,
         enable_alt_stream: bool = True,
         enable_kv_cache_copy: bool = False,
-        num_quest_pages: int = 256,
+        num_quest_pages: int = 300,
         num_recent_pages: int = 32,
     ):
         super().__init__(
